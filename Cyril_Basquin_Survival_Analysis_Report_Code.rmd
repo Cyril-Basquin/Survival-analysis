@@ -1,0 +1,290 @@
+---
+title: "Code for the Analysis of the Clinical Trial on D-penicillamine efficiency to treat Primary Biliary Cirrhosis performed by the Mayo Clinic in the 70’s"
+output: pdf_document
+---
+
+## Description of the Mayo Clinic Primary Biliary Cirrhosis Data
+
+id:	case number
+time: 	number of days between registration and the earlier of death, transplantion, or study analysis in July, 1986
+    => Transformed in months for a better comprehension
+    
+status:	status at endpoint, 0/1 for censored, dead
+    => transplanted patients are pooled wither censored one
+        
+trt:	1/2/NA for D-penicillmain, placebo, not randomised
+    => Rename in 'Drug', 'Placebo', 'Not_rand'
+
+sex:	m/f
+age:	in years
+stage:	histologic stage of disease (needs biopsy)
+
+ascites:	presence of ascites
+edema:	0 no edema, 
+        0.5 untreated or successfully treated
+	      1 edema despite diuretic therapy
+hepato:	presence of hepatomegaly or enlarged liver
+spiders:	blood vessel malformations in the skin
+
+albumin:	serum albumin (g/dl)
+alk.phos:	alkaline phosphotase (U/liter)
+ast:	aspartate aminotransferase, once called SGOT (U/ml)
+bili:	serum bilirunbin (mg/dl)
+chol:	serum cholesterol (mg/dl)
+copper:	urine copper (ug/day)
+trig:	triglycerides (mg/dl)
+
+platelet:	platelet count
+protime:	standardised blood clotting time
+
+
+
+## library import
+
+```{r}
+library(dplyr)
+library(survival)
+```
+
+
+## Data importation and transformation
+
+```{r}
+data <- pbc
+# When transplanted -> Censored
+# Survive is now 1
+data <- mutate(data, status = ifelse(status == 1, 0,
+                              ifelse(status == 2, 1, status)))
+
+# Replace treatment value 0/1 by drug/placebo for better comprehension later
+data <- mutate(data, trt = ifelse(trt == 1, 'drug', 
+                           ifelse(trt == 2, 'placebo', trt)))
+data <- mutate(data, trt = ifelse(is.na(data$trt), 'Not_rand', trt))
+
+# Modification of the 'time' from day to month
+data <- mutate(data, time = time/(365.25/12))
+
+data$trt <- as.factor(data$trt)
+data$ascites <- as.factor(data$ascites)
+data$hepato <- as.factor(data$hepato)
+data$spiders <- as.factor(data$spiders)
+data$edema <- as.factor(data$edema)
+data$stage <- as.factor(data$stage)
+#data$status <- as.factor(data$status)
+
+head(data)
+summary(subset(data, trt != 'Not_rand'))
+
+```
+
+
+## Test of the repartition of the variable 'sex' between placebo and D-penicillamin group
+
+```{r}
+tmp <- with(subset(data, trt != 'Not_rand' ), table(trt, sex))
+tmp
+
+fisher.test(tmp)
+```
+
+# Test of the age repartition between placebo and D-penicillamin group
+
+```{r}
+# Placebo Patients are younger
+
+placebo <- subset(data, trt == 'placebo', age)
+drug <- subset(data, trt == 'drug', age)
+
+boxplot(c(placebo, drug))
+t.test(placebo, drug)
+
+# Cox regression model show an effect of the age
+cox <- coxph(Surv(time, status) ~ age , data = subset(data, trt != 'Not_rand' ))
+
+
+
+```
+
+## Age stratification
+
+```{r}
+summary(subset(data, trt != 'Not_rand'))
+
+data <- mutate(data, age_group = ifelse(age < 43, 'young', 
+                                 ifelse(age > 56, 'old', 'middle')))
+
+data$age_group <- as.factor(data$age_group)
+summary(data)
+
+```
+
+## Cox regression model to test treatment effect considering treatment, age and sex
+
+```{r}
+#Cox Regression
+cox <- coxph(Surv(time, status) ~ trt + sex + strata(age_group) , data = subset(data, trt != 'Not_rand'))
+cox
+
+# Age distribution of the not randomized group
+Not_rand <- subset(data, trt == 'Not_rand', age)
+summary(Not_rand)
+boxplot(c(placebo, drug, Not_rand))
+
+# Kaplan-Meier estimation
+surv_fit <- survfit(Surv(time, status) ~ trt , data = data)
+plot(surv_fit, col =1:3, xlab='Time in month', ylab='Survival rate')
+legend("topright", lty = 1, col = 1:3, legend = names(surv_fit$strata))
+
+# LogRank test
+surv_diff <- survdiff(Surv(time, status) ~ trt , data = subset(data, trt != 'Not_rand'))
+surv_diff
+
+```
+
+
+
+## PART 2
+
+## Creation of a dataset with no missing values to compute the model
+```{r}
+# Remove rows with missing values
+data_model <- data[complete.cases(data),]
+```
+
+## Model with only placebo group 
+```{r}
+data_placebo <- subset(data_model, trt == 'placebo' )
+
+tail(data)
+```
+
+
+## Cox regression model with all the variables on group placebo data
+```{r}
+
+model_full_placebo <- coxph(Surv(time, status) ~ sex + age + ascites + hepato + spiders + log(bili) + log(chol) + log(albumin) + log(copper) + log(alk.phos) + log(ast) + log(trig) + platelet + protime, data = data_placebo)
+
+```
+
+## Automatic Selection of the covariates using stepwise method
+```{r}
+model_placebo <- step(model_full_placebo)
+```
+
+## Summary of the 'Best' model
+
+```{r}
+model_placebo
+```
+
+
+
+# As it's not significant, spiders were removed from the placebo model
+```{r}
+model_placebo <- coxph(formula = Surv(time, status) ~ age + spiders + log(bili), data = data_placebo)
+
+summary(model_placebo)
+```
+
+
+## Martingales residuals for model 1
+
+```{r}
+
+# Calculate Martingales
+data_placebo$residual <- residuals(model_placebo, type='martingale')
+
+#Plot martingales
+par(mfrow = c(1, 3))
+with(data_placebo, {
+
+  plot(age , residual)
+  lines(lowess(age, residual), lwd = 2)
+  
+  plot(bili , residual)
+  lines(lowess(bili, residual), lwd = 2)
+  
+  plot(residual ~ spiders)
+
+})
+
+```
+
+## Deltas-Betas for model 1
+
+```{r}
+dfbetas <- residuals(model_placebo, type = 'dfbetas')
+data_placebo$dfbetas <- sqrt(rowSums(dfbetas^2))
+
+
+plot(data_placebo$dfbetas, type = 'h', ylab= 'Deltas-Betas Residuals', xlab= 'Patient ID' )
+
+```
+
+
+## MODEL 2: Dataset taken into consideration: group Placebo + D-penicillamine
+
+## Cox regression model with all the variables on group placebo data
+
+```{r}
+model_full <- coxph(Surv(time, status) ~ sex + age + ascites + hepato + spiders + log(bili) + log(chol) + log(albumin) + log(copper) + log(alk.phos) + log(ast) + log(trig) + platelet + protime, data = data_model)
+```
+
+## Automatic Selection of the covariates using stepwise method
+
+```{r}
+model <- step(model_full)
+```
+
+
+
+# Summary of model 2
+
+```{r}
+model <- coxph(formula = Surv(time, status) ~ age + log(bili) + log(albumin) + log(log(copper)) + protime, data = data_model)
+  
+summary(model)
+```
+
+
+## Martingales for model 2
+
+```{r}
+# Calculate Martingales
+data_model$residual <- residuals(model, type='martingale')
+
+# Plot Martingales for each covariates
+par(mfrow = c(2, 3))
+with(data_model, {
+
+  plot(age , residual)
+  lines(lowess(age, residual), lwd = 2)
+  
+  plot(bili , residual)
+  lines(lowess(bili, residual), lwd = 2)
+
+  plot(albumin , residual)
+  lines(lowess(albumin, residual), lwd = 2)
+  
+  plot(copper , residual)
+  lines(lowess(copper, residual), lwd = 2)
+  
+  plot(protime , residual)
+  lines(lowess(copper, residual), lwd = 2)
+  
+
+})
+
+
+```
+
+## Delta-betas for model 2
+
+```{r}
+dfbetas <- residuals(model, type = 'dfbetas')
+data_model$dfbetas <- sqrt(rowSums(dfbetas^2))
+
+
+plot(data_model$dfbetas, type = 'h', ylab= 'Delta-Betas Residuals', xlab = 'Patient Id')
+abline(h = 0)
+```
